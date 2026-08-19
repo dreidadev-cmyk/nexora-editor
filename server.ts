@@ -11,43 +11,47 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.NEXORA_PORT || 3000);
+const HOST = process.env.NEXORA_HOST || "0.0.0.0";
+const BODY_LIMIT = process.env.NEXORA_BODY_LIMIT || "50mb";
+const AI_MODEL = process.env.NEXORA_AI_MODEL || "gemini-3.7-flash";
+const AI_ASSISTANT_TEMPERATURE = Number(process.env.NEXORA_AI_TEMPERATURE_ASSISTANT || 0.4);
+const AI_AGENT_TEMPERATURE = Number(process.env.NEXORA_AI_TEMPERATURE_AGENT || 0.2);
+const AI_USER_AGENT = process.env.NEXORA_AI_USER_AGENT || "Nexora-Editor";
+const APP_NAME = process.env.VITE_APP_NAME || "Nexora Editor";
 
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 
-// Initialize Gemini SDK lazily / with fallback
 let genAIInstance: GoogleGenAI | null = null;
 
 function getGenAI(): GoogleGenAI | null {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return null;
-  }
+  if (!apiKey) return null;
+
   if (!genAIInstance) {
     genAIInstance = new GoogleGenAI({
       apiKey,
       httpOptions: {
         headers: {
-          "User-Agent": "aistudio-build",
+          "User-Agent": AI_USER_AGENT,
         },
       },
     });
   }
+
   return genAIInstance;
 }
 
-// Health check endpoint
-app.get("/api/health", (req, res) => {
+app.get("/api/health", (_req, res) => {
   res.json({
     status: "ok",
-    service: "Nexora Editor Server",
+    service: APP_NAME,
     timestamp: new Date().toISOString(),
-    aiConfigured: !!process.env.GEMINI_API_KEY,
+    aiConfigured: Boolean(process.env.GEMINI_API_KEY),
   });
 });
 
-// AI Assistant Chat & Code Generation Endpoint
 app.post("/api/ai/assistant", async (req, res) => {
   try {
     const message = req.body.message || req.body.prompt || "";
@@ -59,15 +63,15 @@ app.post("/api/ai/assistant", async (req, res) => {
     const ai = getGenAI();
     if (!ai) {
       return res.status(503).json({
-        error: "Gemini API key is not configured in server environment. Please set GEMINI_API_KEY.",
+        error: "AI provider is not configured. Set GEMINI_API_KEY in the server environment.",
       });
     }
 
     const filesArray = Array.isArray(projectContext?.files)
       ? projectContext.files
       : Array.isArray(projectContext?.allFiles)
-      ? projectContext.allFiles
-      : [];
+        ? projectContext.allFiles
+        : [];
 
     const filesSummary = filesArray
       .map((f: { name?: string; path?: string; content?: string }) => `File: ${f.path || f.name}\n\`\`\`\n${(f.content || "").slice(0, 3000)}\n\`\`\``)
@@ -78,36 +82,31 @@ You help users write clean, modern, accessible, bug-free HTML, CSS, JavaScript, 
 Provide direct, actionable, production-ready code with concise explanations.
 When providing code modifications, specify clearly which file is affected and provide complete, working code.
 
-Project Name: ${projectContext?.name || "Nexora Project"}
+Project Name: ${projectContext?.name || APP_NAME}
 Active File: ${activeFile?.path || activeFile?.name || "None"}
 Task Mode: ${taskType || "general"}
 
 Current Project Files Context:
 ${filesSummary || "No files provided."}`;
 
-    const userPrompt = `${message}
-${selectedCode ? `\nSelected Code snippet:\n\`\`\`\n${selectedCode}\n\`\`\`` : ""}`;
+    const userPrompt = `${message}${selectedCode ? `\n\nSelected Code snippet:\n\`\`\`\n${selectedCode}\n\`\`\`` : ""}`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.7-flash",
+      model: AI_MODEL,
       contents: userPrompt,
       config: {
         systemInstruction: systemPrompt,
-        temperature: 0.4,
+        temperature: AI_ASSISTANT_TEMPERATURE,
       },
     });
 
-    const replyText = response.text || "No response generated.";
-    res.json({ reply: replyText });
+    res.json({ reply: response.text || "No response generated." });
   } catch (error: any) {
     console.error("AI Assistant Error:", error);
-    res.status(500).json({
-      error: error.message || "Failed to process AI request.",
-    });
+    res.status(500).json({ error: error.message || "Failed to process AI request." });
   }
 });
 
-// AI Agent Autonomous Coding Endpoint (Plan, Multi-file edits, JSON response)
 app.post("/api/ai/agent", async (req, res) => {
   try {
     const goal = req.body.goal || req.body.prompt || "";
@@ -117,7 +116,7 @@ app.post("/api/ai/agent", async (req, res) => {
     const ai = getGenAI();
     if (!ai) {
       return res.status(503).json({
-        error: "Gemini API key is not configured in server environment. Please set GEMINI_API_KEY.",
+        error: "AI provider is not configured. Set GEMINI_API_KEY in the server environment.",
       });
     }
 
@@ -151,7 +150,7 @@ Rules:
 
     const userPrompt = `Goal: ${goal}
 
-Project Name: ${projectContext?.name || "Nexora Project"}
+Project Name: ${projectContext?.name || APP_NAME}
 ${currentErrors && currentErrors.length > 0 ? `Current Runtime/Build Errors:\n${JSON.stringify(currentErrors, null, 2)}\n` : ""}
 
 Current Project Files:
@@ -160,20 +159,20 @@ ${filesSummary || "Empty project."}
 Execute the task and return the structured JSON plan and file edits.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.7-flash",
+      model: AI_MODEL,
       contents: userPrompt,
       config: {
         systemInstruction: systemPrompt,
         responseMimeType: "application/json",
-        temperature: 0.2,
+        temperature: AI_AGENT_TEMPERATURE,
       },
     });
 
     const jsonStr = response.text || "{}";
-    let agentResult: any = {};
+    let agentResult: any;
     try {
       agentResult = JSON.parse(jsonStr);
-    } catch (parseErr) {
+    } catch {
       const cleaned = jsonStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
       agentResult = JSON.parse(cleaned);
     }
@@ -197,25 +196,19 @@ Execute the task and return the structured JSON plan and file edits.`;
     });
   } catch (error: any) {
     console.error("AI Agent Error:", error);
-    res.status(500).json({
-      error: error.message || "Failed to execute AI Agent task.",
-    });
+    res.status(500).json({ error: error.message || "Failed to execute AI Agent task." });
   }
 });
 
-// Deploy build & validation endpoint
 app.post("/api/deploy/validate", async (req, res) => {
   try {
-    const { project, targetProvider, providerToken } = req.body;
-    if (!project || !project.files || project.files.length === 0) {
+    const { project, targetProvider } = req.body;
+    if (!project || !Array.isArray(project.files) || project.files.length === 0) {
       return res.status(400).json({ error: "Project has no files to deploy." });
     }
 
     const target: "vercel" | "cloudflare" | "netlify" | "static" = targetProvider || "static";
-
-    const hasIndexHtml = project.files.some(
-      (f: { name: string; path: string }) => (f.path || f.name).toLowerCase() === "index.html"
-    );
+    const hasIndexHtml = project.files.some((f: { name: string; path: string }) => (f.path || f.name).toLowerCase() === "index.html");
 
     const logs: string[] = [
       `[Validation Pipeline] Inspecting project: "${project.name}"...`,
@@ -237,50 +230,44 @@ app.post("/api/deploy/validate", async (req, res) => {
     const bundleSizeKb = Math.max(1, Math.round(rawSize / 1024));
     logs.push(`[Package Size] Calculated bundle payload: ~${bundleSizeKb} KB.`);
 
-    // Generate accurate provider configuration file
     let configFileName = "";
     let configFileContent = "";
     let cliCommand = "";
+    const normalizedProjectName = (project.name || APP_NAME).toLowerCase().replace(/[^a-z0-9]/g, "-");
 
     if (target === "vercel") {
       configFileName = "vercel.json";
-      configFileContent = JSON.stringify(
-        {
-          version: 2,
-          name: (project.name || "nexora-app").toLowerCase().replace(/[^a-z0-9]/g, "-"),
-          builds: [{ src: "index.html", use: "@vercel/static" }],
-          routes: [{ src: "/(.*)", dest: "/index.html" }],
-        },
-        null,
-        2
-      );
-      cliCommand = "npx vercel --prod";
+      configFileContent = JSON.stringify({
+        version: 2,
+        name: normalizedProjectName,
+        builds: [{ src: "index.html", use: "@vercel/static" }],
+        routes: [{ src: "/(.*)", dest: "/index.html" }],
+      }, null, 2);
+      cliCommand = process.env.NEXORA_VERCEL_CLI_COMMAND || "npx vercel --prod";
       logs.push(`[Config Generator] Generated Vercel configuration (vercel.json).`);
       logs.push(`[CLI Recommendation] Run "${cliCommand}" in the exported project directory.`);
     } else if (target === "netlify") {
       configFileName = "netlify.toml";
       configFileContent = `[build]\n  publish = "."\n\n[[redirects]]\n  from = "/*"\n  to = "/index.html"\n  status = 200\n`;
-      cliCommand = "npx netlify deploy --prod --dir=.";
+      cliCommand = process.env.NEXORA_NETLIFY_CLI_COMMAND || "npx netlify deploy --prod --dir=.";
       logs.push(`[Config Generator] Generated Netlify configuration (netlify.toml).`);
       logs.push(`[CLI Recommendation] Run "${cliCommand}" to publish to Netlify.`);
     } else if (target === "cloudflare") {
       configFileName = "_headers";
       configFileContent = `/*\n  X-Frame-Options: SAMEORIGIN\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n`;
-      cliCommand = `npx wrangler pages deploy . --project-name ${(project.name || "nexora-app").toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+      cliCommand = process.env.NEXORA_CLOUDFLARE_CLI_COMMAND || `npx wrangler pages deploy . --project-name ${normalizedProjectName}`;
       logs.push(`[Config Generator] Generated Cloudflare Pages security headers (_headers).`);
       logs.push(`[CLI Recommendation] Run "${cliCommand}".`);
     } else {
-      configFileName = "README.md";
-      configFileContent = `# ${project.name}\n\nThis is a static web application built with Nexora Editor.\nDeploy by uploading the files to any web host (GitHub Pages, S3, Apache, Nginx, or Caddy).\n`;
-      cliCommand = "npx serve .";
+      configFileName = process.env.NEXORA_STATIC_README_FILE || "README.md";
+      configFileContent = `# ${project.name}\n\nThis is a static web application built with ${APP_NAME}.\nDeploy by uploading the files to any web host.\n`;
+      cliCommand = process.env.NEXORA_STATIC_PREVIEW_COMMAND || "npx serve .";
       logs.push(`[Static Package] Production static package ready for hosting.`);
     }
 
     logs.push(`[Validation Complete] Build validation passed with 0 fatal errors. Ready to deploy.`);
 
     const deploymentId = `val_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-
-    // Do NOT generate fake live URLs. Status is "validated"
     res.json({
       success: true,
       deploymentId,
@@ -298,7 +285,6 @@ app.post("/api/deploy/validate", async (req, res) => {
   }
 });
 
-// Server start & Vite integration
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -309,13 +295,13 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
+    app.get("*", (_req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Nexora Editor Server listening on http://0.0.0.0:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`${APP_NAME} Server listening on http://${HOST}:${PORT}`);
   });
 }
 
