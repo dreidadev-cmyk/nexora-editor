@@ -1,0 +1,6 @@
+{
+  "name": "Nexora Editor",
+  "description": "Production-Ready Android & PC/Web Coding IDE with Monaco editor, live sandbox preview, multi-file management, AI Assistant & Agent, ZIP import/export, and Supabase cloud sync.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
