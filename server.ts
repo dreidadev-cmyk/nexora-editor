@@ -1,30 +1,18 @@
 import express from "express";
 import path from "path";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 const app = express();
-
-function envString(name: string, fallback: string): string {
-  const value = process.env[name]?.trim();
-  return value || fallback;
-}
-
-function envNumber(name: string, fallback: number, min?: number, max?: number): number {
-  const raw = process.env[name];
-  const value = raw === undefined || raw.trim() === "" ? fallback : Number(raw);
+const envString = (name: string, fallback: string) => process.env[name]?.trim() || fallback;
+const envNumber = (name: string, fallback: number, min?: number, max?: number) => {
+  const value = process.env[name]?.trim() ? Number(process.env[name]) : fallback;
   if (!Number.isFinite(value)) return fallback;
-  if (min !== undefined && value < min) return min;
-  if (max !== undefined && value > max) return max;
-  return value;
-}
+  return Math.max(min ?? -Infinity, Math.min(max ?? Infinity, value));
+};
 
 const PORT = envNumber("NEXORA_PORT", 3000, 1, 65535);
 const HOST = envString("NEXORA_HOST", "0.0.0.0");
@@ -42,111 +30,34 @@ app.use(express.json({ limit: BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 
 let genAIInstance: GoogleGenAI | null = null;
-
-function getGenAI(): GoogleGenAI | null {
+const getGenAI = () => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) return null;
-
-  if (!genAIInstance) {
-    genAIInstance = new GoogleGenAI({
-      apiKey,
-      httpOptions: {
-        headers: { "User-Agent": AI_USER_AGENT },
-      },
-    });
-  }
-
+  if (!genAIInstance) genAIInstance = new GoogleGenAI({ apiKey, httpOptions: { headers: { "User-Agent": AI_USER_AGENT } } });
   return genAIInstance;
-}
+};
+const safeErrorMessage = (error: unknown, fallback: string) => process.env.NODE_ENV !== "production" && error instanceof Error ? error.message : fallback;
+const getProjectFiles = (context: any) => (Array.isArray(context?.files) ? context.files : Array.isArray(context?.allFiles) ? context.allFiles : []).slice(0, MAX_PROJECT_FILES);
+const buildFilesSummary = (files: any[], fullContent = false) => files.map((f: any) => `File: ${f.path || f.name || "unnamed"}\n\`\`\`\n${String(f.content || "").slice(0, fullContent ? MAX_FILE_CONTENT_CHARS : Math.min(MAX_FILE_CONTENT_CHARS, 3000))}\n\`\`\``).join("\n\n");
+const assertPromptSize = (prompt: string) => { if (prompt.length > MAX_AI_REQUEST_CHARS) throw Object.assign(new Error("AI request is too large."), { code: "REQUEST_TOO_LARGE" }); };
 
-function safeErrorMessage(error: unknown, fallback: string): string {
-  if (process.env.NODE_ENV !== "production" && error instanceof Error && error.message) {
-    return error.message;
-  }
-  return fallback;
-}
-
-function getProjectFiles(projectContext: any): any[] {
-  const files = Array.isArray(projectContext?.files)
-    ? projectContext.files
-    : Array.isArray(projectContext?.allFiles)
-      ? projectContext.allFiles
-      : [];
-  return files.slice(0, MAX_PROJECT_FILES);
-}
-
-function buildFilesSummary(files: any[], fullContent = false): string {
-  return files
-    .map((f: { name?: string; path?: string; content?: string }) => {
-      const content = String(f.content || "");
-      const limit = fullContent ? MAX_FILE_CONTENT_CHARS : Math.min(MAX_FILE_CONTENT_CHARS, 3000);
-      return `File: ${f.path || f.name || "unnamed"}\n\`\`\`\n${content.slice(0, limit)}\n\`\`\``;
-    })
-    .join("\n\n");
-}
-
-function assertPromptSize(prompt: string): void {
-  if (prompt.length > MAX_AI_REQUEST_CHARS) {
-    throw Object.assign(new Error("AI request is too large."), { code: "REQUEST_TOO_LARGE" });
-  }
-}
-
-app.get("/api/health", (_req, res) => {
-  res.json({
-    status: "ok",
-    service: APP_NAME,
-    timestamp: new Date().toISOString(),
-    aiConfigured: Boolean(process.env.GEMINI_API_KEY),
-  });
-});
+app.get("/api/health", (_req, res) => res.json({ status: "ok", service: APP_NAME, timestamp: new Date().toISOString(), aiConfigured: Boolean(process.env.GEMINI_API_KEY) }));
 
 app.post("/api/ai/assistant", async (req, res) => {
   try {
     const message = String(req.body.message || req.body.prompt || "");
-    const projectContext = req.body.projectContext || req.body.project || req.body.context || {};
-    const activeFile = req.body.activeFile || (req.body.context ? {
-      name: req.body.context.activeFileName,
-      content: req.body.context.activeFileContent,
-    } : undefined);
-    const selectedCode = req.body.selectedCode ? String(req.body.selectedCode) : "";
-    const taskType = String(req.body.taskType || "general");
-
+    const context = req.body.projectContext || req.body.project || req.body.context || {};
+    const activeFile = req.body.activeFile || (req.body.context ? { name: req.body.context.activeFileName } : undefined);
+    const selectedCode = String(req.body.selectedCode || "");
     const ai = getGenAI();
-    if (!ai) {
-      return res.status(503).json({ error: "AI provider is not configured." });
-    }
-
-    const filesArray = getProjectFiles(projectContext);
-    const filesSummary = buildFilesSummary(filesArray);
-    const systemPrompt = `You are Nexora AI Assistant, an expert full-stack developer and coding assistant integrated into the Nexora Editor IDE.
-You help users write clean, modern, accessible, bug-free HTML, CSS, JavaScript, TypeScript, React, and Tailwind code.
-Provide direct, actionable, production-ready code with concise explanations.
-When providing code modifications, specify clearly which file is affected and provide complete, working code.
-
-Project Name: ${String(projectContext?.name || APP_NAME)}
-Active File: ${String(activeFile?.path || activeFile?.name || "None")}
-Task Mode: ${taskType}
-
-Current Project Files Context:
-${filesSummary || "No files provided."}`;
-
-    const userPrompt = `${message}${selectedCode ? `\n\nSelected Code snippet:\n\`\`\`\n${selectedCode.slice(0, MAX_FILE_CONTENT_CHARS)}\n\`\`\`` : ""}`;
+    if (!ai) return res.status(503).json({ error: "AI provider is not configured." });
+    const systemPrompt = `You are Nexora AI Assistant, an expert full-stack developer and coding assistant integrated into the Nexora Editor IDE. Provide direct, actionable, production-ready code with concise explanations.\nProject Name: ${String(context?.name || APP_NAME)}\nActive File: ${String(activeFile?.path || activeFile?.name || "None")}\nCurrent Project Files Context:\n${buildFilesSummary(getProjectFiles(context)) || "No files provided."}`;
+    const userPrompt = `${message}${selectedCode ? `\n\nSelected Code:\n\`\`\`\n${selectedCode.slice(0, MAX_FILE_CONTENT_CHARS)}\n\`\`\`` : ""}`;
     assertPromptSize(systemPrompt + userPrompt);
-
-    const response = await ai.models.generateContent({
-      model: AI_MODEL,
-      contents: userPrompt,
-      config: {
-        systemInstruction: systemPrompt,
-        temperature: AI_ASSISTANT_TEMPERATURE,
-      },
-    });
-
+    const response = await ai.models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, temperature: AI_ASSISTANT_TEMPERATURE } });
     return res.json({ reply: response.text || "No response generated." });
   } catch (error: unknown) {
-    if ((error as { code?: string })?.code === "REQUEST_TOO_LARGE") {
-      return res.status(413).json({ error: "AI request is too large. Reduce the selected code or project context." });
-    }
+    if ((error as any)?.code === "REQUEST_TOO_LARGE") return res.status(413).json({ error: "AI request is too large. Reduce the selected code or project context." });
     console.error("AI Assistant Error:", error);
     return res.status(500).json({ error: safeErrorMessage(error, "Failed to process AI request.") });
   }
@@ -155,78 +66,20 @@ ${filesSummary || "No files provided."}`;
 app.post("/api/ai/agent", async (req, res) => {
   try {
     const goal = String(req.body.goal || req.body.prompt || "");
-    const projectContext = req.body.projectContext || req.body.project || {};
-    const currentErrors = req.body.currentErrors;
-
+    const context = req.body.projectContext || req.body.project || {};
     const ai = getGenAI();
-    if (!ai) {
-      return res.status(503).json({ error: "AI provider is not configured." });
-    }
-
-    const filesArray = getProjectFiles(projectContext);
-    const filesSummary = buildFilesSummary(filesArray, true);
-    const systemPrompt = `You are Nexora AI Agent, an autonomous software engineer that inspects projects, plans solutions, and generates exact multi-file edits.
-You must respond with valid JSON matching this schema:
-{
-  "summary": "Brief description of what was planned and done",
-  "plan": ["Step 1: ...", "Step 2: ...", "Step 3: ..."],
-  "fileActions": [{ "action": "create" | "update" | "delete", "path": "path/to/file.ext", "content": "Full complete new file content", "explanation": "Why this file was modified or created" }],
-  "recommendations": ["Tips or follow-ups for the user"]
-}
-
-Rules:
-1. Return ONLY pure JSON with no markdown wrapping or code blocks.
-2. Provide FULL working code for modified files, not snippets with omitted sections.
-3. Support HTML, CSS, JavaScript, TypeScript, React JSX, JSON.
-4. Ensure responsive design with Tailwind CSS or clean CSS.
-5. If there are active errors, analyze and fix them specifically.`;
-
-    const errorsText = Array.isArray(currentErrors) && currentErrors.length > 0
-      ? `Current Runtime/Build Errors:\n${JSON.stringify(currentErrors).slice(0, MAX_FILE_CONTENT_CHARS * 4)}\n`
-      : "";
-    const userPrompt = `Goal: ${goal}\n\nProject Name: ${String(projectContext?.name || APP_NAME)}\n${errorsText}\nCurrent Project Files:\n${filesSummary || "Empty project."}\n\nExecute the task and return the structured JSON plan and file edits.`;
+    if (!ai) return res.status(503).json({ error: "AI provider is not configured." });
+    const systemPrompt = `You are Nexora AI Agent. Return ONLY valid JSON with summary, plan, fileActions, and recommendations. Provide complete code for modified files and analyze active errors specifically.`;
+    const errors = Array.isArray(req.body.currentErrors) ? JSON.stringify(req.body.currentErrors).slice(0, MAX_FILE_CONTENT_CHARS * 4) : "";
+    const userPrompt = `Goal: ${goal}\nProject Name: ${String(context?.name || APP_NAME)}\nErrors: ${errors}\nCurrent Project Files:\n${buildFilesSummary(getProjectFiles(context), true) || "Empty project."}`;
     assertPromptSize(systemPrompt + userPrompt);
-
-    const response = await ai.models.generateContent({
-      model: AI_MODEL,
-      contents: userPrompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: "application/json",
-        temperature: AI_AGENT_TEMPERATURE,
-      },
-    });
-
-    const jsonStr = response.text || "{}";
-    let agentResult: any;
-    try {
-      agentResult = JSON.parse(jsonStr);
-    } catch {
-      const cleaned = jsonStr.replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim();
-      agentResult = JSON.parse(cleaned);
-    }
-
-    const steps = Array.isArray(agentResult.plan)
-      ? agentResult.plan.map((p: any, idx: number) => ({
-          stepNumber: idx + 1,
-          name: typeof p === "string" ? (p.includes(":") ? p.split(":")[0] : `Step ${idx + 1}`) : `Step ${idx + 1}`,
-          status: "completed",
-          description: typeof p === "string" ? p : JSON.stringify(p),
-        }))
-      : [];
-
-    return res.json({
-      success: true,
-      summary: agentResult.summary || "AI Agent generated file actions.",
-      steps,
-      fileActions: Array.isArray(agentResult.fileActions) ? agentResult.fileActions : [],
-      recommendations: Array.isArray(agentResult.recommendations) ? agentResult.recommendations : [],
-      result: agentResult,
-    });
+    const response = await ai.models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, responseMimeType: "application/json", temperature: AI_AGENT_TEMPERATURE } });
+    let result: any;
+    try { result = JSON.parse(response.text || "{}"); } catch { result = JSON.parse((response.text || "{}").replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim()); }
+    const steps = Array.isArray(result.plan) ? result.plan.map((p: any, i: number) => ({ stepNumber: i + 1, name: typeof p === "string" ? p.split(":")[0] : `Step ${i + 1}`, status: "completed", description: typeof p === "string" ? p : JSON.stringify(p) })) : [];
+    return res.json({ success: true, summary: result.summary || "AI Agent generated file actions.", steps, fileActions: Array.isArray(result.fileActions) ? result.fileActions : [], recommendations: Array.isArray(result.recommendations) ? result.recommendations : [], result });
   } catch (error: unknown) {
-    if ((error as { code?: string })?.code === "REQUEST_TOO_LARGE") {
-      return res.status(413).json({ error: "AI request is too large. Reduce the project context." });
-    }
+    if ((error as any)?.code === "REQUEST_TOO_LARGE") return res.status(413).json({ error: "AI request is too large. Reduce the project context." });
     console.error("AI Agent Error:", error);
     return res.status(500).json({ error: safeErrorMessage(error, "Failed to process AI Agent request.") });
   }
@@ -235,76 +88,26 @@ Rules:
 app.post("/api/deploy/validate", async (req, res) => {
   try {
     const { project, targetProvider } = req.body;
-    if (!project || !Array.isArray(project.files) || project.files.length === 0) {
-      return res.status(400).json({ error: "Project has no files to deploy." });
-    }
-
-    const target: "vercel" | "cloudflare" | "netlify" | "static" = targetProvider || "static";
+    if (!project || !Array.isArray(project.files) || project.files.length === 0) return res.status(400).json({ error: "Project has no files to deploy." });
+    const target = ["vercel", "cloudflare", "netlify", "static"].includes(targetProvider) ? targetProvider : "static";
     const files = project.files;
-    const hasIndexHtml = files.some((f: { name?: string; path?: string }) => (f.path || f.name || "").toLowerCase().replace(/^\.\//, "") === "index.html");
-    const logs: string[] = [
-      `[Validation Pipeline] Inspecting project: "${String(project.name || APP_NAME)}"...`,
-      `[Validation Pipeline] Target platform: ${target.toUpperCase()}`,
-      `[Validation Pipeline] Analyzing ${files.length} project file(s)...`,
-    ];
-
+    const logs: string[] = [`[Validation Pipeline] Inspecting project: "${String(project.name || APP_NAME)}"...`, `[Validation Pipeline] Target platform: ${target.toUpperCase()}`, `[Validation Pipeline] Analyzing ${files.length} project file(s)...`];
     let fatalErrors = 0;
-    if (!hasIndexHtml) {
-      fatalErrors++;
-      logs.push(`[Validation Error] No root "index.html" file detected.`);
-    } else {
-      logs.push(`[Validation Success] Verified entry point: index.html.`);
-    }
-
-    const invalidFiles = files.filter((f: any) => !String(f.path || f.name || "").trim());
-    if (invalidFiles.length > 0) {
-      fatalErrors += invalidFiles.length;
-      logs.push(`[Validation Error] ${invalidFiles.length} file(s) have no valid path.`);
-    }
-
-    const cssCount = files.filter((f: any) => String(f.name || f.path || "").toLowerCase().endsWith(".css")).length;
-    const jsCount = files.filter((f: any) => /\.(js|jsx|ts|tsx)$/i.test(String(f.name || f.path || ""))).length;
-    logs.push(`[Asset Analysis] Identified ${cssCount} stylesheet(s) and ${jsCount} JavaScript/TypeScript script(s).`);
-
-    const rawSize = JSON.stringify(files).length;
-    const bundleSizeKb = Math.max(1, Math.round(rawSize / 1024));
+    const hasIndex = files.some((f: any) => (f.path || f.name || "").toLowerCase().replace(/^\.\//, "") === "index.html");
+    if (!hasIndex) { fatalErrors++; logs.push(`[Validation Error] No root "index.html" file detected.`); } else logs.push(`[Validation Success] Verified entry point: index.html.`);
+    const invalid = files.filter((f: any) => !String(f.path || f.name || "").trim()).length;
+    if (invalid) { fatalErrors += invalid; logs.push(`[Validation Error] ${invalid} file(s) have no valid path.`); }
+    logs.push(`[Asset Analysis] Identified ${files.filter((f: any) => /\.css$/i.test(f.name || f.path || "")).length} stylesheet(s) and ${files.filter((f: any) => /\.(js|jsx|ts|tsx)$/i.test(f.name || f.path || "")).length} JavaScript/TypeScript script(s).`);
+    const bundleSizeKb = Math.max(1, Math.round(JSON.stringify(files).length / 1024));
     logs.push(`[Package Size] Calculated bundle payload: ~${bundleSizeKb} KB.`);
-
-    if (fatalErrors > 0) {
-      logs.push(`[Validation Failed] ${fatalErrors} fatal error(s) found. Deployment is blocked.`);
-      return res.status(422).json({ success: false, status: "invalid", fatalErrors, logs, timestamp: new Date().toISOString() });
-    }
-
-    let configFileName = "";
-    let configFileContent = "";
-    let cliCommand = "";
-    const normalizedProjectName = String(project.name || APP_NAME).toLowerCase().replace(/[^a-z0-9]/g, "-");
-
-    if (target === "vercel") {
-      configFileName = "vercel.json";
-      configFileContent = JSON.stringify({ version: 2, name: normalizedProjectName, builds: [{ src: "index.html", use: "@vercel/static" }], routes: [{ src: "/(.*)", dest: "/index.html" }] }, null, 2);
-      cliCommand = envString("NEXORA_VERCEL_CLI_COMMAND", "npx vercel --prod");
-      logs.push(`[Config Generator] Generated Vercel configuration.`);
-    } else if (target === "netlify") {
-      configFileName = "netlify.toml";
-      configFileContent = `[build]\n  publish = "."\n\n[[redirects]]\n  from = "/*"\n  to = "/index.html"\n  status = 200\n`;
-      cliCommand = envString("NEXORA_NETLIFY_CLI_COMMAND", "npx netlify deploy --prod --dir=.");
-      logs.push(`[Config Generator] Generated Netlify configuration.`);
-    } else if (target === "cloudflare") {
-      configFileName = "_headers";
-      configFileContent = `/*\n  X-Frame-Options: SAMEORIGIN\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n`;
-      cliCommand = envString("NEXORA_CLOUDFLARE_CLI_COMMAND", `npx wrangler pages deploy . --project-name ${normalizedProjectName}`);
-      logs.push(`[Config Generator] Generated Cloudflare Pages security headers.`);
-    } else {
-      configFileName = envString("NEXORA_STATIC_README_FILE", "README.md");
-      configFileContent = `# ${String(project.name || APP_NAME)}\n\nThis is a static web application built with ${APP_NAME}.\n`;
-      cliCommand = envString("NEXORA_STATIC_PREVIEW_COMMAND", "npx serve .");
-      logs.push(`[Static Package] Production static package ready for hosting.`);
-    }
-
-    logs.push(`[Validation Complete] Static validation passed. This endpoint does not execute or compile untrusted project code.`);
-    const deploymentId = `val_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-    return res.json({ success: true, deploymentId, status: "validated", liveUrl: undefined, logs, configFileName, configFileContent, cliCommand, bundleSizeKb, timestamp: new Date().toISOString() });
+    if (fatalErrors) { logs.push(`[Validation Failed] ${fatalErrors} fatal error(s) found. Deployment is blocked.`); return res.status(422).json({ success: false, status: "invalid", fatalErrors, logs, timestamp: new Date().toISOString() }); }
+    const name = String(project.name || APP_NAME).toLowerCase().replace(/[^a-z0-9]/g, "-");
+    let configFileName = "README.md", configFileContent = `# ${String(project.name || APP_NAME)}\n\nStatic package.\n`, cliCommand = envString("NEXORA_STATIC_PREVIEW_COMMAND", "npx serve .");
+    if (target === "vercel") { configFileName = "vercel.json"; configFileContent = JSON.stringify({ version: 2, name, builds: [{ src: "index.html", use: "@vercel/static" }], routes: [{ src: "/(.*)", dest: "/index.html" }] }, null, 2); cliCommand = envString("NEXORA_VERCEL_CLI_COMMAND", "npx vercel --prod"); }
+    else if (target === "netlify") { configFileName = "netlify.toml"; configFileContent = `[build]\n  publish = "."\n\n[[redirects]]\n  from = "/*"\n  to = "/index.html"\n  status = 200\n`; cliCommand = envString("NEXORA_NETLIFY_CLI_COMMAND", "npx netlify deploy --prod --dir=."); }
+    else if (target === "cloudflare") { configFileName = "_headers"; configFileContent = `/*\n  X-Frame-Options: SAMEORIGIN\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: strict-origin-when-cross-origin\n`; cliCommand = envString("NEXORA_CLOUDFLARE_CLI_COMMAND", `npx wrangler pages deploy . --project-name ${name}`); }
+    logs.push(`[Validation Complete] Static validation passed. No untrusted project code was executed or compiled.`);
+    return res.json({ success: true, deploymentId: `val_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`, status: "validated", logs, configFileName, configFileContent, cliCommand, bundleSizeKb, timestamp: new Date().toISOString() });
   } catch (error: unknown) {
     console.error("Deployment validation error:", error);
     return res.status(500).json({ error: safeErrorMessage(error, "Deployment validation failed.") });
@@ -320,10 +123,6 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get("*", (_req, res) => res.sendFile(path.join(distPath, "index.html")));
   }
-
-  app.listen(PORT, HOST, () => {
-    console.log(`${APP_NAME} Server listening on http://${HOST}:${PORT}`);
-  });
+  app.listen(PORT, HOST, () => console.log(`${APP_NAME} Server listening on http://${HOST}:${PORT}`));
 }
-
 startServer();
