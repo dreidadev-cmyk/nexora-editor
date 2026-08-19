@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ExternalLink, Smartphone, Tablet, Laptop, Monitor, RefreshCw, AlertTriangle, RotateCw, Maximize2, X, Play } from "lucide-react";
 import { useProject, DEVICE_PRESETS } from "../../context/ProjectContext";
 import { buildSandboxHtml } from "../../lib/bundler";
@@ -13,6 +13,19 @@ export const PreviewPane: React.FC = () => {
   const errorCount = runtimeErrors.length;
   const currentPreset = DEVICE_PRESETS[selectedPreviewDevice];
   const htmlContent = currentProject ? buildSandboxHtml(currentProject.files) : "";
+
+  useEffect(() => {
+    const handleToggle = () => {
+      setIsPreviewOpen((open) => {
+        const next = !open;
+        setIsFullscreen(false);
+        if (next && currentProject) runPreview();
+        return next;
+      });
+    };
+    window.addEventListener("nexora:toggle-preview", handleToggle);
+    return () => window.removeEventListener("nexora:toggle-preview", handleToggle);
+  }, [currentProject, runPreview]);
 
   const openPreview = () => {
     if (!currentProject) return;
