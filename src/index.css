@@ -1,1 +1,42 @@
 @import "tailwindcss";
+
+/* Nexora Editor workspace: keep the Monaco editor wide on desktop.
+   Preview is rendered as an on-demand overlay, so it must never permanently
+   consume half of the coding surface. */
+@media (min-width: 768px) {
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay),
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) {
+    position: relative;
+  }
+
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:first-child,
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:first-child {
+    width: 100% !important;
+    flex: 1 1 100% !important;
+    min-width: 0;
+  }
+
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:nth-child(2),
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:nth-child(2),
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:last-child,
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:last-child {
+    display: none !important;
+    width: 0 !important;
+    flex: 0 0 0 !important;
+  }
+}
+
+/* Prevent horizontal page overflow on narrow devices. */
+html,
+body,
+#root {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* Comfortable touch targets for phone/tablet controls. */
+@media (max-width: 767px) {
+  button {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
