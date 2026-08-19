@@ -25,36 +25,51 @@ const APP_NAME = envString("VITE_APP_NAME", "Nexora Editor");
 const MAX_FILE_CONTENT_CHARS = envNumber("NEXORA_AI_MAX_FILE_CHARS", 3000, 256, 50000);
 const MAX_PROJECT_FILES = envNumber("NEXORA_AI_MAX_PROJECT_FILES", 100, 1, 1000);
 const MAX_AI_REQUEST_CHARS = envNumber("NEXORA_AI_MAX_REQUEST_CHARS", 500000, 10000, 2000000);
+const AI_REQUESTS_PER_MINUTE = envNumber("NEXORA_AI_REQUESTS_PER_MINUTE", 20, 1, 120);
 
 app.use(express.json({ limit: BODY_LIMIT }));
 app.use(express.urlencoded({ extended: true, limit: BODY_LIMIT }));
 
-let genAIInstance: GoogleGenAI | null = null;
-const getGenAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-  if (!genAIInstance) genAIInstance = new GoogleGenAI({ apiKey, httpOptions: { headers: { "User-Agent": AI_USER_AGENT } } });
-  return genAIInstance;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+const rateLimit = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const now = Date.now();
+  const key = req.ip || req.socket.remoteAddress || "unknown";
+  const bucket = rateBuckets.get(key);
+  if (!bucket || bucket.resetAt <= now) {
+    rateBuckets.set(key, { count: 1, resetAt: now + 60_000 });
+    return next();
+  }
+  if (bucket.count >= AI_REQUESTS_PER_MINUTE) {
+    return res.status(429).json({ error: "AI request rate limit exceeded. Please wait and try again." });
+  }
+  bucket.count += 1;
+  return next();
 };
+
+const getUserApiKey = (req: express.Request) => {
+  const key = String(req.header("x-nexora-ai-key") || "").trim();
+  return key || null;
+};
+const getGenAI = (apiKey: string) => new GoogleGenAI({ apiKey, httpOptions: { headers: { "User-Agent": AI_USER_AGENT } } });
 const safeErrorMessage = (error: unknown, fallback: string) => process.env.NODE_ENV !== "production" && error instanceof Error ? error.message : fallback;
 const getProjectFiles = (context: any) => (Array.isArray(context?.files) ? context.files : Array.isArray(context?.allFiles) ? context.allFiles : []).slice(0, MAX_PROJECT_FILES);
 const buildFilesSummary = (files: any[], fullContent = false) => files.map((f: any) => `File: ${f.path || f.name || "unnamed"}\n\`\`\`\n${String(f.content || "").slice(0, fullContent ? MAX_FILE_CONTENT_CHARS : Math.min(MAX_FILE_CONTENT_CHARS, 3000))}\n\`\`\``).join("\n\n");
 const assertPromptSize = (prompt: string) => { if (prompt.length > MAX_AI_REQUEST_CHARS) throw Object.assign(new Error("AI request is too large."), { code: "REQUEST_TOO_LARGE" }); };
 
-app.get("/api/health", (_req, res) => res.json({ status: "ok", service: APP_NAME, timestamp: new Date().toISOString(), aiConfigured: Boolean(process.env.GEMINI_API_KEY) }));
+app.get("/api/health", (_req, res) => res.json({ status: "ok", service: APP_NAME, timestamp: new Date().toISOString(), aiConfigured: true, aiMode: "user-provided-key" }));
 
-app.post("/api/ai/assistant", async (req, res) => {
+app.post("/api/ai/assistant", rateLimit, async (req, res) => {
   try {
+    const apiKey = getUserApiKey(req);
+    if (!apiKey) return res.status(401).json({ error: "AI API key required. Add your provider API key in Nexora AI Settings." });
     const message = String(req.body.message || req.body.prompt || "");
     const context = req.body.projectContext || req.body.project || req.body.context || {};
     const activeFile = req.body.activeFile || (req.body.context ? { name: req.body.context.activeFileName } : undefined);
     const selectedCode = String(req.body.selectedCode || "");
-    const ai = getGenAI();
-    if (!ai) return res.status(503).json({ error: "AI provider is not configured." });
     const systemPrompt = `You are Nexora AI Assistant, an expert full-stack developer and coding assistant integrated into the Nexora Editor IDE. Provide direct, actionable, production-ready code with concise explanations.\nProject Name: ${String(context?.name || APP_NAME)}\nActive File: ${String(activeFile?.path || activeFile?.name || "None")}\nCurrent Project Files Context:\n${buildFilesSummary(getProjectFiles(context)) || "No files provided."}`;
     const userPrompt = `${message}${selectedCode ? `\n\nSelected Code:\n\`\`\`\n${selectedCode.slice(0, MAX_FILE_CONTENT_CHARS)}\n\`\`\`` : ""}`;
     assertPromptSize(systemPrompt + userPrompt);
-    const response = await ai.models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, temperature: AI_ASSISTANT_TEMPERATURE } });
+    const response = await getGenAI(apiKey).models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, temperature: AI_ASSISTANT_TEMPERATURE } });
     return res.json({ reply: response.text || "No response generated." });
   } catch (error: unknown) {
     if ((error as any)?.code === "REQUEST_TOO_LARGE") return res.status(413).json({ error: "AI request is too large. Reduce the selected code or project context." });
@@ -63,17 +78,17 @@ app.post("/api/ai/assistant", async (req, res) => {
   }
 });
 
-app.post("/api/ai/agent", async (req, res) => {
+app.post("/api/ai/agent", rateLimit, async (req, res) => {
   try {
+    const apiKey = getUserApiKey(req);
+    if (!apiKey) return res.status(401).json({ error: "AI API key required. Add your provider API key in Nexora AI Settings." });
     const goal = String(req.body.goal || req.body.prompt || "");
     const context = req.body.projectContext || req.body.project || {};
-    const ai = getGenAI();
-    if (!ai) return res.status(503).json({ error: "AI provider is not configured." });
     const systemPrompt = `You are Nexora AI Agent. Return ONLY valid JSON with summary, plan, fileActions, and recommendations. Provide complete code for modified files and analyze active errors specifically.`;
     const errors = Array.isArray(req.body.currentErrors) ? JSON.stringify(req.body.currentErrors).slice(0, MAX_FILE_CONTENT_CHARS * 4) : "";
     const userPrompt = `Goal: ${goal}\nProject Name: ${String(context?.name || APP_NAME)}\nErrors: ${errors}\nCurrent Project Files:\n${buildFilesSummary(getProjectFiles(context), true) || "Empty project."}`;
     assertPromptSize(systemPrompt + userPrompt);
-    const response = await ai.models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, responseMimeType: "application/json", temperature: AI_AGENT_TEMPERATURE } });
+    const response = await getGenAI(apiKey).models.generateContent({ model: AI_MODEL, contents: userPrompt, config: { systemInstruction: systemPrompt, responseMimeType: "application/json", temperature: AI_AGENT_TEMPERATURE } });
     let result: any;
     try { result = JSON.parse(response.text || "{}"); } catch { result = JSON.parse((response.text || "{}").replace(/^```json\s*/i, "").replace(/\s*```$/, "").trim()); }
     const steps = Array.isArray(result.plan) ? result.plan.map((p: any, i: number) => ({ stepNumber: i + 1, name: typeof p === "string" ? p.split(":")[0] : `Step ${i + 1}`, status: "completed", description: typeof p === "string" ? p : JSON.stringify(p) })) : [];
