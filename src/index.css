@@ -1,28 +1,40 @@
 @import "tailwindcss";
 
-/* Nexora Editor workspace: keep the Monaco editor wide on desktop.
-   Preview is rendered as an on-demand overlay, so it must never permanently
-   consume half of the coding surface. */
+/* Desktop editor workspace: the code editor owns all available space.
+   Preview is opened on demand as a fixed overlay and must never reserve a
+   permanent right-hand column. */
 @media (min-width: 768px) {
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay),
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) {
-    position: relative;
+  .nexora-editor-workspace {
+    min-width: 0;
+    width: 100%;
   }
 
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:first-child,
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:first-child {
+  /* Current App.tsx desktop workspace wrapper. */
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex > div:first-child {
     width: 100% !important;
     flex: 1 1 100% !important;
-    min-width: 0;
+    min-width: 0 !important;
   }
 
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:nth-child(2),
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:nth-child(2),
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-overlay) > div:last-child,
-  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex:has(.nexora-preview-closed) > div:last-child {
+  /* Remove the old divider and permanently reserved preview column. */
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex > div:nth-child(2),
+  .flex-1.flex.overflow-hidden.relative.hidden.md\:flex > div:nth-child(3) {
     display: none !important;
     width: 0 !important;
+    min-width: 0 !important;
     flex: 0 0 0 !important;
+  }
+
+  /* If PreviewPane is mounted in the workspace, its fixed overlay remains
+     visible because this rule only targets direct layout columns. */
+  .nexora-preview-overlay {
+    position: fixed !important;
+    z-index: 9999 !important;
   }
 }
 
