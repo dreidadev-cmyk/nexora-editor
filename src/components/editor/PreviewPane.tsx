@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { ExternalLink, Smartphone, Tablet, Laptop, Monitor, RefreshCw, AlertTriangle, RotateCw, Maximize2, X, Play } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ExternalLink, Smartphone, Tablet, Laptop, Monitor, RefreshCw, AlertTriangle, RotateCw, Maximize2, X } from "lucide-react";
 import { useProject, DEVICE_PRESETS } from "../../context/ProjectContext";
 import { buildSandboxHtml } from "../../lib/bundler";
 
@@ -16,10 +17,11 @@ export const PreviewPane: React.FC = () => {
 
   useEffect(() => {
     const handleToggle = () => {
+      if (!currentProject) return;
       setIsPreviewOpen((open) => {
         const next = !open;
         setIsFullscreen(false);
-        if (next && currentProject) runPreview();
+        if (next) runPreview();
         return next;
       });
     };
@@ -27,55 +29,39 @@ export const PreviewPane: React.FC = () => {
     return () => window.removeEventListener("nexora:toggle-preview", handleToggle);
   }, [currentProject, runPreview]);
 
-  const openPreview = () => {
-    if (!currentProject) return;
-    setIsPreviewOpen(true);
-    runPreview();
-  };
   const closePreview = () => {
     setIsPreviewOpen(false);
     setIsFullscreen(false);
   };
-  const refreshPreview = () => {
-    if (!isPreviewOpen) return openPreview();
-    runPreview();
-  };
+  const refreshPreview = () => runPreview();
   const openInNewTab = () => {
     if (!htmlContent) return;
     const url = URL.createObjectURL(new Blob([htmlContent], { type: "text/html" }));
     window.open(url, "_blank", "noopener,noreferrer");
-    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
   };
 
   const previewWidth = currentPreset.width ? (isRotated ? currentPreset.height : currentPreset.width) : undefined;
   const previewHeight = currentPreset.height ? (isRotated ? currentPreset.width : currentPreset.height) : undefined;
 
-  if (!isPreviewOpen) {
-    return (
-      <div className="nexora-preview-closed h-full min-h-0 w-full bg-transparent flex items-center justify-center p-4 text-center">
-        <button onClick={openPreview} disabled={!currentProject} className="inline-flex items-center gap-2 rounded-xl border border-indigo-500/30 bg-indigo-600/10 px-4 py-2.5 text-sm font-bold text-indigo-300 transition hover:border-indigo-400/50 hover:bg-indigo-600/20 hover:text-white disabled:opacity-40">
-          <Play className="h-4 w-4 fill-current" /> Run Preview
-        </button>
-      </div>
-    );
-  }
+  if (!isPreviewOpen || typeof document === "undefined") return null;
 
-  return (
-    <div className={`nexora-preview-overlay fixed inset-3 sm:inset-5 lg:inset-8 z-[100] flex flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/60 ${isFullscreen ? "!inset-0 !rounded-none" : ""}`}>
-      <div className="min-h-10 bg-slate-900/95 border-b border-slate-800 px-2 sm:px-3 py-1.5 flex items-center justify-between select-none shrink-0 text-slate-300 text-xs gap-2 backdrop-blur">
-        <div className="flex items-center gap-0.5 sm:gap-1 min-w-0 overflow-x-auto scrollbar-none">
-          <button onClick={() => setDevicePreset("custom")} className={`px-2 py-1 rounded text-xs whitespace-nowrap ${selectedPreviewDevice === "custom" ? "bg-slate-950 text-indigo-400 font-semibold border border-slate-800" : "text-slate-400 hover:text-slate-200"}`}>Fluid</button>
-          <button onClick={() => setDevicePreset("mobile")} title="Mobile" className={`p-1.5 rounded ${selectedPreviewDevice === "mobile" ? "bg-slate-950 text-indigo-400 border border-slate-800" : "text-slate-400 hover:bg-slate-800"}`}><Smartphone className="w-3.5 h-3.5" /></button>
-          <button onClick={() => setDevicePreset("tablet")} title="Tablet" className={`p-1.5 rounded ${selectedPreviewDevice === "tablet" ? "bg-slate-950 text-indigo-400 border border-slate-800" : "text-slate-400 hover:bg-slate-800"}`}><Tablet className="w-3.5 h-3.5" /></button>
+  return createPortal(
+    <div className={`fixed inset-3 sm:inset-5 lg:inset-8 z-[9999] flex flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-950 shadow-2xl shadow-black/60 ${isFullscreen ? "!inset-0 !rounded-none" : ""}`}>
+      <div className="min-h-10 shrink-0 bg-slate-900/95 border-b border-slate-800 px-2 sm:px-3 py-1.5 flex items-center justify-between gap-2 text-xs text-slate-300 backdrop-blur">
+        <div className="flex items-center gap-1 min-w-0 overflow-x-auto">
+          <button onClick={() => setDevicePreset("custom")} className={`px-2 py-1 rounded whitespace-nowrap ${selectedPreviewDevice === "custom" ? "bg-slate-950 text-indigo-400" : "text-slate-400 hover:text-white"}`}>Fluid</button>
+          <button onClick={() => setDevicePreset("mobile")} title="Mobile" className={`p-1.5 rounded ${selectedPreviewDevice === "mobile" ? "bg-slate-950 text-indigo-400" : "text-slate-400 hover:bg-slate-800"}`}><Smartphone className="w-3.5 h-3.5" /></button>
+          <button onClick={() => setDevicePreset("tablet")} title="Tablet" className={`p-1.5 rounded ${selectedPreviewDevice === "tablet" ? "bg-slate-950 text-indigo-400" : "text-slate-400 hover:bg-slate-800"}`}><Tablet className="w-3.5 h-3.5" /></button>
           <button onClick={() => setDevicePreset("laptop")} title="Laptop" className="hidden sm:block p-1.5 rounded text-slate-400 hover:bg-slate-800"><Laptop className="w-3.5 h-3.5" /></button>
           <button onClick={() => setDevicePreset("desktop")} title="Desktop" className="hidden sm:block p-1.5 rounded text-slate-400 hover:bg-slate-800"><Monitor className="w-3.5 h-3.5" /></button>
         </div>
-        {errorCount > 0 && <button onClick={() => setActivePanel("terminal")} className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-950/80 border border-rose-800 text-rose-300 text-[11px] shrink-0"><AlertTriangle className="w-3 h-3" />{errorCount} Error{errorCount > 1 ? "s" : ""}</button>}
+        {errorCount > 0 && <button onClick={() => setActivePanel("terminal")} className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-rose-950 border border-rose-800 text-rose-300 shrink-0"><AlertTriangle className="w-3 h-3" />{errorCount} Error{errorCount > 1 ? "s" : ""}</button>}
         <div className="flex items-center gap-0.5 shrink-0">
           {selectedPreviewDevice !== "custom" && <button onClick={() => setIsRotated(v => !v)} title="Rotate" className="p-1.5 rounded text-slate-400 hover:bg-slate-800 hover:text-white"><RotateCw className="w-3.5 h-3.5" /></button>}
-          <button onClick={() => setZoomLevel(z => Math.max(50, z - 10))} title="Zoom out" className="hidden sm:block px-1.5 py-1 rounded text-slate-400 hover:bg-slate-800">−</button>
-          <span className="hidden sm:inline text-[10px] text-slate-500 w-8 text-center">{zoomLevel}%</span>
-          <button onClick={() => setZoomLevel(z => Math.min(150, z + 10))} title="Zoom in" className="hidden sm:block px-1.5 py-1 rounded text-slate-400 hover:bg-slate-800">+</button>
+          <button onClick={() => setZoomLevel(z => Math.max(50, z - 10))} className="hidden sm:block px-1.5 py-1 text-slate-400 hover:bg-slate-800">−</button>
+          <span className="hidden sm:inline w-8 text-center text-[10px] text-slate-500">{zoomLevel}%</span>
+          <button onClick={() => setZoomLevel(z => Math.min(150, z + 10))} className="hidden sm:block px-1.5 py-1 text-slate-400 hover:bg-slate-800">+</button>
           <button onClick={refreshPreview} title="Refresh" className="p-1.5 rounded text-slate-400 hover:bg-slate-800 hover:text-white"><RefreshCw className="w-3.5 h-3.5" /></button>
           <button onClick={openInNewTab} title="Open in new tab" className="hidden sm:block p-1.5 rounded text-slate-400 hover:bg-slate-800 hover:text-white"><ExternalLink className="w-3.5 h-3.5" /></button>
           <button onClick={() => setIsFullscreen(v => !v)} title="Fullscreen" className="hidden sm:block p-1.5 rounded text-slate-400 hover:bg-slate-800 hover:text-white"><Maximize2 className="w-3.5 h-3.5" /></button>
@@ -87,6 +73,7 @@ export const PreviewPane: React.FC = () => {
           <iframe key={`sandbox_${previewKey}`} srcDoc={htmlContent} title="Nexora Live Sandbox" sandbox="allow-scripts allow-modals allow-forms allow-same-origin" className="w-full h-full border-0 bg-white" />
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };
